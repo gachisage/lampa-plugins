@@ -3,7 +3,7 @@
  *
  *   1. Баннер наверху главной: большие кадры из популярных фильмов и сериалов недели
  *      с логотипом, жанрами и описанием. Влево/вправо — листать, ОК — открыть.
- *   2. Логотипы вместо текстовых названий: в баннере и в карточке фильма.
+ *   2. Логотипы вместо текстовых названий в баннере.
  *   3. Живой фон: на главной и в категориях за рядами проявляется кадр из фильма под фокусом.
  *
  * Картинки и логотипы — TMDB через встроенный в Лампу прокси. Код на ES5 для старых ТВ.
@@ -59,9 +59,6 @@
     '.cinema-hero.focus{box-shadow:0 0 0 .25em #fff}',
     '.cinema-hero__hint{margin-top:1em;font-size:1em;color:rgba(255,255,255,.55);opacity:0;transition:opacity .3s}',
     '.cinema-hero.focus .cinema-hero__hint{opacity:1}',
-    '.full-start-new__title.cinema-logo-title{font-size:1em;line-height:1;margin-top:.45em;margin-bottom:.45em}',
-    '.cinema-logo-title img{display:block;width:auto;height:3.2em;max-width:85%;object-fit:contain;object-position:left center}',
-    '.cinema-logo-title img.cinema-logo--tall{height:5.5em}',
     '.cinema-ambient{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;opacity:0;transition:opacity .5s}',
     '.cinema-ambient--active{opacity:1}',
     '.cinema-ambient__img{position:absolute;top:0;right:0;width:72%;height:80%;object-fit:cover;opacity:0;transition:opacity .8s}',
@@ -336,31 +333,6 @@
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  2. Логотип вместо названия в карточке фильма
-  // ─────────────────────────────────────────────────────────────
-
-  function onFullCard(event) {
-    if (event.type !== 'complite' || !isOn(SETTING.logos, true)) return;
-    var card = event.data && event.data.movie;
-    if (!card || !card.id) return;
-
-    var render = event.object.activity.render();
-    var title = render.find('.full-start-new__title').first();
-    if (!title.length) return;
-
-    loadLogo(card, function (url) {
-      if (!url) return;
-      var logo = element('img');
-      logo.alt = card.title || card.name || '';
-      logo.onload = function () {
-        markTall(logo);
-        title.addClass('cinema-logo-title').empty().append(logo);
-      };
-      logo.src = url;
-    });
-  }
-
-  // ─────────────────────────────────────────────────────────────
   //  3. Живой фон за рядами главной
   // ─────────────────────────────────────────────────────────────
 
@@ -445,7 +417,7 @@
     if (!Lampa.SettingsApi) return;
     Lampa.SettingsApi.addComponent({ component: 'cinema', name: 'Кинотеатр', icon: HERO_ICON });
     addTrigger(SETTING.hero, 'Баннер на главной', 'Большие кадры популярного за неделю наверху главной');
-    addTrigger(SETTING.logos, 'Логотипы вместо названий', 'В баннере и в карточке фильма');
+    addTrigger(SETTING.logos, 'Логотипы в баннере', 'Логотип фильма вместо текстового названия');
     addTrigger(SETTING.ambient, 'Живой фон', 'Кадр из фильма под фокусом за рядами главной', function () {
       setAmbientActive(isOn(SETTING.ambient, true) && !!AMBIENT_SCREENS[currentScreen()]);
     });
@@ -462,7 +434,6 @@
     addSettings();
     registerHero();
     startAmbient();
-    Lampa.Listener.follow('full', onFullCard);
   }
 
   if (window.appready) start();
