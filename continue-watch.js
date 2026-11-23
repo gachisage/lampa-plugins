@@ -6,6 +6,8 @@
  * считается просмотренной, и включается следующая. Недосмотренная продолжается с того же места
  * (это делает плеер Лампы по своему таймкоду).
  * В карточке сериала появляется кнопка «Продолжить S5E2» с тем же действием.
+ * На главной обычный ряд «Продолжить просмотр» заменяется широким: кадр из серии,
+ * номер и название серии, сколько осталось и полоска прогресса.
  *
  * Если что-то пошло не так (нет BWA, серия не нашлась), остаётся открытым список серий BWA.
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
@@ -35,7 +37,33 @@
   var BUTTON_CLASS = 'continue-watch-button';
   var PLAY_SVG = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
 
+  var SETTING_WIDE = 'continue_watch_wide';
+  var WIDE_ROW = 'continue_watch_wide';
+  var WIDE_LIMIT = 12;
+  var WIDE_IMAGE_SIZE = 'w780';
+  var WATCHED_PERCENT = 90;
+  var TMDB_SOURCES = { tmdb: true, cub: true };
+
+  var WIDE_STYLE = [
+    '.items-line--type-continue-wide .scroll__body{padding-bottom:.6em}',
+    '.cw-card{position:relative;flex-shrink:0;width:22em;height:12.4em;margin-right:1em;border-radius:.8em;',
+    'overflow:hidden;background-color:rgba(255,255,255,.08)}',
+    '.cw-card__img{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .4s}',
+    '.cw-card--loaded .cw-card__img{opacity:1}',
+    '.cw-card__shade{position:absolute;top:0;left:0;width:100%;height:100%;',
+    'background:linear-gradient(0deg,rgba(0,0,0,.9) 0%,rgba(0,0,0,.4) 50%,rgba(0,0,0,0) 78%)}',
+    '.cw-card__body{position:absolute;left:1em;right:1em;bottom:1.1em}',
+    '.cw-card__title{font-size:1.25em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.cw-card__episode{margin-top:.2em;color:rgba(255,255,255,.85);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.cw-card__time{margin-top:.15em;font-size:.9em;color:rgba(255,255,255,.6)}',
+    '.cw-card__progress{display:none;position:absolute;left:0;right:0;bottom:0;height:.3em;background:rgba(255,255,255,.25)}',
+    '.cw-card--progress .cw-card__progress{display:block}',
+    '.cw-card__bar{height:100%;background:#fff}',
+    '.cw-card.focus{box-shadow:0 0 0 .2em #fff}'
+  ].join('');
+
   var progressCache = {};
+  var episodeMemory = {};
   var flow = null;
 
   function isOn(name, defaultValue) {
@@ -380,6 +408,256 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  Широкий ряд «Продолжить просмотр» на главной
+  // ─────────────────────────────────────────────────────────────
+
+  function wideEnabled() {
+    return isOn(SETTING_WIDE, true) && isOn('content_rows_' + WIDE_ROW, true);
+  }
+
+  function hashTitle(card) {
+    return card.original_name || card.original_title || '';
+  }
+
+  function movieTime(card) {
+    return Lampa.Timeline.view(Lampa.Utils.hash(hashTitle(card)));
+  }
+
+  function episodeTime(card, target) {
+    var season = target.season;
+    return Lampa.Timeline.view(Lampa.Utils.hash([season, season > 10 ? ':' : '', target.number, hashTitle(card)].join('')));
+  }
+
+  function tmdbId(card) {
+    return TMDB_SOURCES[card.source || 'tmdb'] ? card.id : 0;
+  }
+
+  function tmdbImage(path) {
+    return path ? Lampa.TMDB.image('t/p/' + WIDE_IMAGE_SIZE + path) : '';
+  }
+
+  function wideCards() {
+    var order = {};
+    (Lampa.Favorite.get({ type: 'history' }) || []).forEach(function (card, index) {
+      if (!order.hasOwnProperty(card.id)) order[card.id] = index;
+    });
+    var movies = Lampa.Favorite.continues('movie').filter(function (card) {
+      var percent = movieTime(card).percent;
+      return percent > 0 && percent < WATCHED_PERCENT;
+    });
+    return Lampa.Favorite.continues('tv').concat(Lampa.Favorite.continues('anime'), movies)
+      .filter(function (card) { return card.backdrop_path || card.poster_path; })
+      .sort(function (a, b) { return (order[a.id] || 0) - (order[b.id] || 0); })
+      .slice(0, WIDE_LIMIT);
+  }
+
+  function loadEpisode(card, target, callback) {
+    var id = tmdbId(card);
+    if (!id) return callback({});
+    var key = id + ':' + target.season + ':' + target.number;
+    if (episodeMemory[key]) return callback(episodeMemory[key]);
+
+    var url = Lampa.TMDB.api('tv/' + id + '/season/' + target.season + '/episode/' + target.number +
+      '?api_key=' + Lampa.TMDB.key() + '&language=' + (Lampa.Storage.get('tmdb_lang', 'ru') || 'ru'));
+    var network = new Lampa.Reguest();
+    network.timeout(REQUEST_TIMEOUT);
+    network.silent(url, function (json) {
+      episodeMemory[key] = json || {};
+      callback(episodeMemory[key]);
+    }, function () {
+      callback({});
+    });
+  }
+
+  function remainingText(time) {
+    if (!time.duration || !time.percent) return '';
+    var minutes = Math.max(1, Math.round((time.duration - time.time) / 60));
+    var hours = Math.floor(minutes / 60);
+    var parts = [];
+    if (hours) parts.push(hours + ' ч');
+    if (minutes % 60) parts.push(minutes % 60 + ' мин');
+    return 'осталось ' + parts.join(' ');
+  }
+
+  function node(tag, className, text) {
+    var element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text) element.textContent = text;
+    return element;
+  }
+
+  // Элемент ряда Лампы: create / render / destroy, события hover:* приходят на корневой узел
+  function WideCard(data) {
+    this.card = data.card;
+  }
+
+  WideCard.prototype.create = function () {
+    var self = this;
+    var root = node('div', 'cw-card selector layer--visible layer--render');
+    var body = node('div', 'cw-card__body');
+    var progress = node('div', 'cw-card__progress');
+
+    this.image = node('img', 'cw-card__img');
+    this.episode = node('div', 'cw-card__episode');
+    this.time = node('div', 'cw-card__time');
+    this.bar = node('div', 'cw-card__bar');
+
+    this.image.alt = '';
+    this.image.onload = function () { root.classList.add('cw-card--loaded'); };
+    body.appendChild(node('div', 'cw-card__title', this.card.title || this.card.name));
+    body.appendChild(this.episode);
+    body.appendChild(this.time);
+    progress.appendChild(this.bar);
+    root.appendChild(this.image);
+    root.appendChild(node('div', 'cw-card__shade'));
+    root.appendChild(body);
+    root.appendChild(progress);
+
+    // По card_data живой фон и другие плагины узнают тайтл под фокусом
+    root.card_data = this.card;
+    root.addEventListener('visible', function () { self.load(); });
+    root.addEventListener('hover:enter', function () { self.open(); });
+    this.html = root;
+  };
+
+  WideCard.prototype.setImage = function (path) {
+    var src = tmdbImage(path);
+    if (src && this.image.getAttribute('src') !== src) this.image.src = src;
+  };
+
+  WideCard.prototype.showTime = function (label, time, idle) {
+    this.episode.textContent = label;
+    this.time.textContent = remainingText(time) || idle || '';
+    this.bar.style.width = Math.min(100, time.percent || 0) + '%';
+    if (time.percent) this.html.classList.add('cw-card--progress');
+  };
+
+  WideCard.prototype.load = function () {
+    if (this.loaded) return;
+    this.loaded = true;
+    var self = this;
+    var card = this.card;
+
+    if (!isShow(card)) {
+      this.setImage(card.backdrop_path || card.poster_path);
+      return this.showTime('Фильм', movieTime(card));
+    }
+    if (!token()) {
+      this.resolved = true;
+      return this.setImage(card.backdrop_path || card.poster_path);
+    }
+
+    nextEpisode(card, function (target) {
+      if (!self.html) return;
+      self.target = target;
+      self.resolved = true;
+      if (!target) return self.setImage(card.backdrop_path || card.poster_path);
+
+      var code = episodeCode(target);
+      self.showTime(code, episodeTime(card, target), 'Следующая серия');
+      loadEpisode(card, target, function (info) {
+        if (!self.html) return;
+        if (info.name) self.episode.textContent = code + ' · ' + info.name;
+        self.setImage(info.still_path || card.backdrop_path || card.poster_path);
+      });
+    });
+  };
+
+  WideCard.prototype.open = function () {
+    var card = this.card;
+    var show = isShow(card);
+    // Trakt уже ответил, что сериал досмотрен, — просто открываем карточку
+    if (show && token() && isOn(SETTING_ENABLED, true) && (this.target || !this.resolved)) {
+      startFlow(card, this.target || null);
+    }
+    Lampa.Activity.push({
+      url: '',
+      component: 'full',
+      id: card.id,
+      method: show ? 'tv' : 'movie',
+      card: card,
+      source: card.source || 'tmdb'
+    });
+  };
+
+  WideCard.prototype.render = function (js) {
+    return js ? this.html : $(this.html);
+  };
+
+  WideCard.prototype.use = function () {};
+
+  WideCard.prototype.destroy = function () {
+    if (!this.html) return;
+    this.image.onload = null;
+    this.image.removeAttribute('src');
+    if (this.html.parentNode) this.html.parentNode.removeChild(this.html);
+    this.html = null;
+  };
+
+  function registerWideRow() {
+    var part = function (done) {
+      var cards = wideCards();
+      if (!cards.length) return done();
+      done({
+        title: 'Продолжить просмотр',
+        results: cards.map(function (card) {
+          return {
+            id: card.id,
+            card: card,
+            params: { createInstance: function (item) { return new WideCard(item); } }
+          };
+        }),
+        params: {
+          type: 'continue-wide',
+          items: { mapping: 'line', align_left: true, view: 6 }
+        }
+      });
+    };
+    part.row_name = WIDE_ROW;
+    part.row_title = 'Продолжить просмотр (широкие карточки)';
+
+    Lampa.ContentRows.add({
+      name: WIDE_ROW,
+      title: 'Продолжить просмотр (широкие карточки)',
+      index: 1,
+      screen: ['main'],
+      call: function () {
+        return isOn(SETTING_WIDE, true) ? part : undefined;
+      }
+    });
+  }
+
+  // Встроенный ряд узнаём по ключам перевода в его коде: имени у готовой части ряда нет
+  function isCoreContinue(part) {
+    if (typeof part !== 'function' || part.row_name) return false;
+    var code = '';
+    try {
+      code = String(part);
+    } catch (e) { /* нативная функция */ }
+    return code.indexOf('title_continue') >= 0 && code.indexOf('title_watched') >= 0;
+  }
+
+  // На главной широкий ряд заменяет встроенный; в категориях встроенный остаётся
+  function hideCoreRow() {
+    var original = Lampa.ContentRows.call;
+    Lampa.ContentRows.call = function (screen, params, calls) {
+      var result = original.apply(this, arguments);
+      if (screen === 'main' && calls && calls.length && wideEnabled()) {
+        for (var i = calls.length - 1; i >= 0; i--) {
+          if (isCoreContinue(calls[i])) calls.splice(i, 1);
+        }
+      }
+      return result;
+    };
+  }
+
+  function addStyle() {
+    var style = node('style');
+    style.textContent = WIDE_STYLE;
+    document.head.appendChild(style);
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  Настройки и запуск
   // ─────────────────────────────────────────────────────────────
 
@@ -393,11 +671,22 @@
         description: 'Сериал из «Продолжить просмотр» и «Смотреть дальше» сразу запускает следующую серию в BWA (по Trakt)'
       }
     });
+    Lampa.SettingsApi.addParam({
+      component: 'interface',
+      param: { name: SETTING_WIDE, type: 'trigger', 'default': true },
+      field: {
+        name: 'Широкий ряд «Продолжить просмотр»',
+        description: 'Кадр из серии, номер и название, сколько осталось. Заменяет обычный ряд на главной'
+      }
+    });
   }
 
   function start() {
+    addStyle();
     addSettings();
     patchActivityPush();
+    hideCoreRow();
+    registerWideRow();
     Lampa.Listener.follow('full', function (event) {
       if (event.type === 'complite') addButton(event);
     });
