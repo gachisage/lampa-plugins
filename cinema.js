@@ -5,6 +5,7 @@
  *      с логотипом, жанрами и описанием. Влево/вправо — листать, ОК — открыть.
  *   2. Логотипы вместо текстовых названий в баннере.
  *   3. Живой фон: на главной и в категориях за рядами проявляется кадр из фильма под фокусом.
+ *   4. Аккуратная карточка фильма: без эмодзи-реакций, понятное время, меньше кнопок.
  *
  * Картинки и логотипы — TMDB через встроенный в Лампу прокси. Код на ES5 для старых ТВ.
  */
@@ -17,8 +18,19 @@
   var SETTING = {
     hero: 'cinema_hero',
     logos: 'cinema_logos',
-    ambient: 'cinema_ambient'
+    ambient: 'cinema_ambient',
+    card: 'cinema_card'
   };
+
+  var CARD_CLASS = 'cinema-card-mode';
+  var HIDDEN_CLASS = 'cinema-hidden';
+  var POLISHED_ATTR = 'data-cinema-polished';
+  var MENU_WAIT = 1500;
+  var MENU_CLOSE_DELAY = 300;
+  var MOVED_BUTTONS = '.button--reaction, .button--subscribe, .trakt-list-manager-button, .trakt-hide-button';
+  var MOVED_LABELS = { 'TraktTV Списки': 'Списки Trakt' };
+  var STATUS_HIDDEN = { 'Выпущенный': true, 'Released': true };
+  var STATUS_TEXT = { 'Онгоинг': 'Выходит' };
 
   var DAY = 24 * 60 * 60 * 1000;
   var HERO_TTL = 6 * 60 * 60 * 1000;
@@ -66,6 +78,14 @@
     '.cinema-ambient__shade{position:absolute;top:0;left:0;width:100%;height:100%;',
     'background:linear-gradient(90deg,#121212 28%,rgba(18,18,18,.55) 55%,rgba(18,18,18,0) 100%),',
     'linear-gradient(0deg,#121212 20%,rgba(18,18,18,0) 70%)}',
+    '.cinema-hidden{display:none!important}',
+    '.cinema-card-mode .full-start-new__reactions{display:none!important}',
+    '.cinema-card-mode .full-start-new__buttons .button--reaction,',
+    '.cinema-card-mode .full-start-new__buttons .button--subscribe,',
+    '.cinema-card-mode .full-start-new__buttons .trakt-list-manager-button,',
+    '.cinema-card-mode .full-start-new__buttons .trakt-hide-button{display:none!important}',
+    '.cinema-card-mode .full-start-new__details{opacity:.85}',
+    '.cinema-card-mode .full-start-new__buttons .button--options{-webkit-box-ordinal-group:2;order:1}',
     '@media (max-width:767px){.cinema-hero{width:88vw;height:56vw}.cinema-hero__content{left:1.2em;bottom:1.2em;width:80%}',
     '.cinema-hero__overview{-webkit-line-clamp:2}.cinema-hero__title{font-size:1.8em}}'
   ].join('');
@@ -401,6 +421,147 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  4. Аккуратная карточка фильма
+  //
+  //  Без эмодзи-реакций и лишних строк, время «1 ч 33 мин», второстепенные
+  //  кнопки (реакции, подписка, списки Trakt, «Не моё») — в меню «Ещё».
+  //  Внешний вид меняется классом на body, поэтому кнопки, которые плагины
+  //  добавляют позже, тоже прячутся.
+  // ─────────────────────────────────────────────────────────────
+
+  function applyCardMode() {
+    if (isOn(SETTING.card, true)) document.body.classList.add(CARD_CLASS);
+    else document.body.classList.remove(CARD_CLASS);
+  }
+
+  function plural(number, one, few, many) {
+    var mod10 = number % 10;
+    var mod100 = number % 100;
+    if (mod10 === 1 && mod100 !== 11) return one;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+    return many;
+  }
+
+  function formatRuntime(text) {
+    var match = /^(\d{1,2}):(\d{2})$/.exec(text);
+    if (!match) return text;
+    var hours = +match[1];
+    var minutes = +match[2];
+    var parts = [];
+    if (hours) parts.push(hours + ' ч');
+    if (minutes || !hours) parts.push(minutes + ' мин');
+    return parts.join(' ');
+  }
+
+  // «Приключения | Боевик» → «Приключения, боевик»; аббревиатуры вроде «НФ» не трогаем
+  function formatGenres(text) {
+    return text.split(/\s*\|\s*/).join(', ').replace(/[А-ЯЁA-Z][а-яёa-z]+/g, function (word, offset) {
+      return offset ? word.charAt(0).toLowerCase() + word.slice(1) : word;
+    });
+  }
+
+  function formatDetail(text) {
+    var seasons = /^Сезоны:\s*(\d+)$/.exec(text);
+    if (seasons) return seasons[1] + ' ' + plural(+seasons[1], 'сезон', 'сезона', 'сезонов');
+    var episodes = /^Серии:\s*(\d+)$/.exec(text);
+    if (episodes) return episodes[1] + ' ' + plural(+episodes[1], 'серия', 'серии', 'серий');
+    if (text.indexOf('|') !== -1) return formatGenres(text);
+    return formatRuntime(text);
+  }
+
+  function polishDetails(details) {
+    // Строка TraktTV «Сезон: 5 • Эпизод: 1» дублирует кнопку «Продолжить»
+    if (details.querySelector('.trakt-icon')) return details.classList.add(HIDDEN_CLASS);
+    var spans = details.children;
+    for (var i = 0; i < spans.length; i++) {
+      var span = spans[i];
+      if (span.hasAttribute(POLISHED_ATTR)) continue;
+      span.setAttribute(POLISHED_ATTR, '1');
+      if (span.classList.contains('full-start-new__split')) span.textContent = '·';
+      else span.textContent = formatDetail(span.textContent.trim());
+    }
+  }
+
+  function polishStatus(status) {
+    var text = status.textContent.trim();
+    if (STATUS_HIDDEN[text]) status.classList.add(HIDDEN_CLASS);
+    else if (STATUS_TEXT[text]) status.textContent = STATUS_TEXT[text];
+  }
+
+  function polishCard(root) {
+    if (!isOn(SETTING.card, true)) return;
+    var details = root.querySelectorAll('.full-start-new__details');
+    for (var i = 0; i < details.length; i++) polishDetails(details[i]);
+    var status = root.querySelector('.full-start__status');
+    if (status) polishStatus(status);
+  }
+
+  function onFullCard(event) {
+    if (event.type !== 'complite') return;
+    var root = event.object.activity.render().find('.full-start-new__right')[0];
+    if (!root) return;
+    polishCard(root);
+    // Плагины дописывают строки и кнопки позже — доводим их по мере появления
+    var timer = 0;
+    new MutationObserver(function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () { polishCard(root); }, 50);
+    }).observe(root, { childList: true, subtree: true });
+  }
+
+  function fireEnter(target) {
+    var event = document.createEvent('Event');
+    event.initEvent('hover:enter', false, true);
+    target.dispatchEvent(event);
+  }
+
+  function movedActions(root) {
+    var actions = [];
+    $(root).find(MOVED_BUTTONS).each(function () {
+      if ($(this).hasClass('hide')) return;
+      var label = $(this).text().replace(/\s+/g, ' ').trim();
+      if (label) actions.push({ title: MOVED_LABELS[label] || label, cinema_button: this });
+    });
+    return actions;
+  }
+
+  // Меню «Ещё» строит ядро; дописываем в его начало спрятанные кнопки
+  function patchMoreMenu() {
+    var pendingRoot = null;
+    var pendingTimer = 0;
+
+    document.addEventListener('hover:enter', function (event) {
+      var target = event.target;
+      if (!target || !target.classList || !target.classList.contains('button--options')) return;
+      if (!isOn(SETTING.card, true)) return;
+      pendingRoot = $(target).closest('.full-start-new')[0] || null;
+      clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(function () { pendingRoot = null; }, MENU_WAIT);
+    }, true);
+
+    var originalShow = Lampa.Select.show;
+    Lampa.Select.show = function (params) {
+      var root = pendingRoot;
+      pendingRoot = null;
+      var actions = root && params && params.items ? movedActions(root) : [];
+      if (!actions.length) return originalShow.apply(this, arguments);
+
+      var originalSelect = params.onSelect;
+      var patched = $.extend({}, params, {
+        items: actions.concat(params.items),
+        onSelect: function (item) {
+          if (!item || !item.cinema_button) return originalSelect ? originalSelect.apply(this, arguments) : undefined;
+          var button = item.cinema_button;
+          Lampa.Controller.toggle('full_start');
+          // Меню закрывается не мгновенно: открываем действие кнопки, когда оно закроется
+          setTimeout(function () { fireEnter(button); }, MENU_CLOSE_DELAY);
+        }
+      });
+      return originalShow.call(this, patched);
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  Настройки и запуск
   // ─────────────────────────────────────────────────────────────
 
@@ -421,6 +582,8 @@
     addTrigger(SETTING.ambient, 'Живой фон', 'Кадр из фильма под фокусом за рядами главной', function () {
       setAmbientActive(isOn(SETTING.ambient, true) && !!AMBIENT_SCREENS[currentScreen()]);
     });
+    addTrigger(SETTING.card, 'Аккуратная карточка фильма',
+      'Без эмодзи-реакций, время «1 ч 33 мин», редкие кнопки — в меню «Ещё»', applyCardMode);
   }
 
   function addStyle() {
@@ -434,6 +597,9 @@
     addSettings();
     registerHero();
     startAmbient();
+    applyCardMode();
+    patchMoreMenu();
+    Lampa.Listener.follow('full', onFullCard);
   }
 
   if (window.appready) start();
