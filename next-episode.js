@@ -7,6 +7,7 @@
  * Отсчёт идёт по времени видео: на паузе он тоже стоит.
  *
  * Работает с любым источником, который передаёт плееру список серий (BWA и др.).
+ * С плагином skip-intro.js кнопка появляется ровно на начале титров, иначе — за N секунд до конца.
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
  */
 (function () {
@@ -130,7 +131,8 @@
     if (duration < MIN_DURATION) return;
 
     var remaining = duration - current;
-    var inTail = remaining <= tailSeconds() && remaining > END_MARGIN;
+    var tail = state.creditsAt > 0 && state.creditsAt < duration ? duration - state.creditsAt : tailSeconds();
+    var inTail = remaining <= tail && remaining > END_MARGIN;
 
     if (!state.active) {
       if (inTail && !state.cancelled && remaining > COUNTDOWN + END_MARGIN && Lampa.PlayerPlaylist.canNext()) show(current);
@@ -186,7 +188,7 @@
       param: { name: SETTING_TAIL, type: 'select', values: TAIL_VALUES, 'default': DEFAULT_TAIL },
       field: {
         name: 'Когда показывать «Следующую серию»',
-        description: 'За сколько до конца серии. Если титры длинные — увеличьте'
+        description: 'За сколько до конца серии, если начало титров неизвестно. Если титры длинные — увеличьте'
       }
     });
   }
@@ -197,7 +199,11 @@
 
     Lampa.Player.listener.follow('start', function () {
       hide();
-      state = { active: false, cancelled: false, shownAt: 0 };
+      state = { active: false, cancelled: false, shownAt: 0, creditsAt: 0 };
+    });
+    // Начало титров из баз таймкодов (плагин skip-intro.js)
+    Lampa.Listener.follow('skip_intro', function (event) {
+      if (state && event.type === 'credits') state.creditsAt = event.start;
     });
     Lampa.Player.listener.follow('destroy', function () {
       hide();
