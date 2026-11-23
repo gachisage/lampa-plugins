@@ -50,7 +50,7 @@
 
   var KEY = {
     ratings: 'trakt_plus_ratings',
-    lists: 'trakt_plus_lists',
+    lists: 'trakt_plus_couch_lists',
     itemsPrefix: 'trakt_plus_items_',
     smart: 'trakt_plus_smart',
     hidden: 'trakt_plus_hidden',
@@ -80,14 +80,15 @@
     1: 'Ужасно'
   };
 
-  // Слоты рядов на главной. Couchmoney создаёт в Trakt списки вида
-  // «Movies - Recommended», «Series - Based on Recently Watched» и т.п.
-  var ROW_SLOTS = [
-    { slot: 'movies_rec', name: 'TraktPlusMoviesRecommended', title: 'Рекомендуем: фильмы', index: 2 },
-    { slot: 'shows_rec', name: 'TraktPlusShowsRecommended', title: 'Рекомендуем: сериалы', index: 3 },
-    { slot: 'movies_recent', name: 'TraktPlusMoviesRecent', title: 'Похоже на недавно просмотренное: фильмы', index: 4 },
-    { slot: 'shows_recent', name: 'TraktPlusShowsRecent', title: 'Похоже на недавно просмотренное: сериалы', index: 5 }
-  ];
+  // Ряды под списки Couchmoney: у бесплатного Trakt не больше 5 списков.
+  // Названия списков пользователь задаёт сам, поэтому ряд получает список по порядку,
+  // а заголовок вычисляется из типа списка (см. couchTitle).
+  var COUCH_ROWS = 5;
+  var COUCH_FIRST_INDEX = 2;
+  var COUCH_ORDER = { rec: 0, recent: 1, based: 2 };
+  var KIND_WORD = { movie: 'фильмы', tv: 'сериалы' };
+  // Слова, которые не несут смысла в названии списка: «Movies - Recommendations (Couchmoney)» → пусто
+  var COUCH_GENERIC_WORDS = /\b(movies?|films?|tv|shows?|series|recommend\w*|recs?|lists?|for me|my|your|based on recently watched)\b/gi;
   var SMART_ROWS = [
     { name: 'TraktPlusSmartMovies', kind: 'movie', title: 'Вам может понравиться: фильмы', index: 2 },
     { name: 'TraktPlusSmartShows', kind: 'tv', title: 'Вам может понравиться: сериалы', index: 3 }
@@ -744,20 +745,62 @@
   //  Модуль 4. Ряды рекомендаций на главной
   // ─────────────────────────────────────────────────────────────
 
-  // Определить, какой это список Couchmoney → слот ряда или null
-  function classifyList(list) {
-    var text = ((list.name || '') + ' ' + ((list.ids && list.ids.slug) || '')).toLowerCase();
-    var recent = /recently[\s-]+watched|based[\s-]+on/.test(text);
-    var recommended = /recommend/.test(text);
-    if (!recent && !recommended) return null;
-    var kind = null;
-    if (/movie|фильм/.test(text)) kind = 'movies';
-    else if (/series|show|сериал|\btv\b/.test(text)) kind = 'shows';
-    if (!kind) return null;
-    return kind + (recent ? '_recent' : '_rec');
+  // Couchmoney дописывает к названию «[couchmoney.tv]», а в описание — «managed by couchmoney»
+  // или «List based on the following recently watched/rated movies».
+  function isCouchList(list) {
+    return /couchmoney/i.test((list.name || '') + ' ' + (list.description || ''));
   }
 
-  // { movies_rec: { id, name, count }, ... }
+  function couchKind(rawText) {
+    var text = rawText.replace(/couch\s*money\.tv/gi, ' ');
+    if (/\b(movies?|films?)\b|фильм/i.test(text)) return 'movie';
+    if (/\b(tv|shows?|series)\b|сериал/i.test(text)) return 'tv';
+    return '';
+  }
+
+  // { id, name, kind: movie|tv|'' (определится по содержимому), type: rec|recent|based, base, created }
+  function describeCouchList(list) {
+    var name = (list.name || '')
+      .replace(/[\[(]\s*couch\s*money[^\])]*[\])]/gi, ' ')
+      .replace(/couch\s*money:?/gi, ' ')
+      .replace(/^[\s\-–—:|,.]+|[\s\-–—:|,.]+$/g, '')
+      .replace(/\s{2,}/g, ' ');
+    var description = list.description || '';
+    var based = /based on the trakt list "([^"]+)"/i.exec(description);
+    var type = based ? 'based' : /recently watched/i.test(description + ' ' + name) ? 'recent' : 'rec';
+    return {
+      id: list.ids.trakt,
+      name: name,
+      kind: couchKind(name) || couchKind(description.split('\n')[0]),
+      type: type,
+      base: based ? based[1] : '',
+      created: list.created_at || ''
+    };
+  }
+
+  // Своё имя списка без служебных слов: «Sci-Fi Recommendations» → «Sci-Fi»
+  function customListName(name) {
+    var rest = name.replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').replace(COUCH_GENERIC_WORDS, ' ');
+    return /[a-zа-я]/i.test(rest) ? name : '';
+  }
+
+  function couchTitle(list, kind) {
+    var word = KIND_WORD[kind] || 'фильмы и сериалы';
+    if (list.type === 'recent') return 'Похоже на недавно просмотренное: ' + word;
+    if (list.type === 'based') return 'Похоже на список «' + list.base + '»';
+    var custom = customListName(list.name);
+    return custom ? 'Рекомендуем: ' + custom : 'Рекомендуем: ' + word;
+  }
+
+  function sortCouchLists(a, b) {
+    var byType = COUCH_ORDER[a.type] - COUCH_ORDER[b.type];
+    if (byType) return byType;
+    var byKind = (a.kind === 'tv') - (b.kind === 'tv');
+    if (byKind) return byKind;
+    return a.created < b.created ? -1 : a.created > b.created ? 1 : 0;
+  }
+
+  // Списки Couchmoney в стабильном порядке: рекомендации, недавно просмотренное, по спискам
   function loadCouchLists(callback) {
     var cached = cacheGet(KEY.lists, LISTS_TTL);
     if (cached) {
@@ -766,18 +809,15 @@
     }
     shared('lists', function (done) {
       traktRequest('GET', '/users/me/lists', null, function (lists) {
-        var slots = {};
-        (lists || []).forEach(function (list) {
-          var slot = classifyList(list);
-          if (slot && !slots[slot] && list.ids && list.ids.trakt) {
-            slots[slot] = { id: list.ids.trakt, name: list.name, count: list.item_count || 0 };
-          }
-        });
-        cacheSet(KEY.lists, slots);
-        if (!Object.keys(slots).length) noticeCouchMissing();
-        done(slots);
+        var couch = (lists || []).filter(function (list) {
+          return list.ids && list.ids.trakt && isCouchList(list);
+        }).map(describeCouchList).sort(sortCouchLists);
+        // Пустой результат не кэшируем: списки Couchmoney появляются через минуты или часы после подключения
+        if (couch.length) cacheSet(KEY.lists, couch);
+        else noticeCouchMissing();
+        done(couch);
       }, function () {
-        done(cacheGetStale(KEY.lists) || {});
+        done(cacheGetStale(KEY.lists) || []);
       });
     }, callback);
   }
@@ -940,9 +980,15 @@
     });
   }
 
-  function loadCouchRow(slot, callback) {
+  function majorityKind(raws) {
+    var tv = raws.filter(function (raw) { return raw.kind === 'tv'; }).length;
+    if (!raws.length) return '';
+    return tv * 2 > raws.length ? 'tv' : 'movie';
+  }
+
+  function loadCouchRow(position, callback) {
     loadCouchLists(function (lists) {
-      var list = lists[slot.slot];
+      var list = lists[position];
       if (!list) {
         callback(null);
         return;
@@ -956,7 +1002,7 @@
           }
           enrichFromTmdb(visible, function (meta) {
             callback({
-              title: slot.title,
+              title: couchTitle(list, list.kind || majorityKind(raws)),
               source: 'tmdb',
               results: visible.map(function (raw) {
                 return buildCard(raw, meta);
@@ -1228,20 +1274,24 @@
     };
   }
 
+  function registerCouchRow(position) {
+    var name = 'TraktPlusCouch' + (position + 1);
+    var title = 'Couchmoney: список ' + (position + 1);
+    Lampa.ContentRows.add({
+      name: name,
+      title: title,
+      index: COUCH_FIRST_INDEX + position,
+      screen: ['main'],
+      call: rowCall(name, title, SETTING.rows, true, function (done) {
+        loadCouchRow(position, done);
+      })
+    });
+  }
+
   function registerRows() {
     if (!Lampa.ContentRows || typeof Lampa.ContentRows.add !== 'function') return;
 
-    ROW_SLOTS.forEach(function (slot) {
-      Lampa.ContentRows.add({
-        name: slot.name,
-        title: slot.title,
-        index: slot.index,
-        screen: ['main'],
-        call: rowCall(slot.name, slot.title, SETTING.rows, true, function (done) {
-          loadCouchRow(slot, done);
-        })
-      });
-    });
+    for (var position = 0; position < COUCH_ROWS; position++) registerCouchRow(position);
 
     SMART_ROWS.forEach(function (row) {
       Lampa.ContentRows.add({
