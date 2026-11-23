@@ -10,6 +10,7 @@
  *      (с русскими названиями и постерами из TMDB).
  *   5. Ряды «Вам может понравиться»: собственный подбор по оценкам, истории просмотров,
  *      лайкам и избранному через рекомендации TMDB. Работает и без Couchmoney.
+ *   6. Ваша оценка Trakt звёздочкой в углу постеров.
  *
  * Требуется установленный и авторизованный TraktTV.js — токен берётся из Lampa.Storage('trakt_token').
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
@@ -64,8 +65,12 @@
     smart: 'trakt_plus_smart_rows',
     autorate: 'trakt_plus_autorate',
     autorateShows: 'trakt_plus_autorate_shows',
-    markWatched: 'trakt_plus_rate_marks_watched'
+    markWatched: 'trakt_plus_rate_marks_watched',
+    badges: 'trakt_plus_badges'
   };
+
+  var BADGE_CLASS = 'trakt-plus-badge';
+  var TMDB_SOURCES = { tmdb: true, cub: true };
 
   var RATING_LABELS = {
     10: 'Шедевр',
@@ -476,6 +481,8 @@
     if (rating) map[key] = { r: rating, at: new Date().toISOString(), t: titleOf(card) };
     else delete map[key];
     cacheSet(KEY.ratings, map, true);
+    badgeRatings = map;
+    paintAllBadges();
   }
 
   function sendRating(card, kind, rating, done) {
@@ -564,7 +571,11 @@
     if (document.getElementById('trakt-plus-style')) return;
     var css = '' +
       '.trakt-rate-button--rated > svg { color: #ffd700; }' +
-      '.trakt-rate-button--rated:not(.focus) > span { color: #ffd700; }';
+      '.trakt-rate-button--rated:not(.focus) > span { color: #ffd700; }' +
+      '.' + BADGE_CLASS + ' { position: absolute; top: .3em; right: .3em; z-index: 1; display: flex; align-items: center;' +
+        ' padding: .2em .5em .2em .35em; border-radius: 1em; background: rgba(0,0,0,.6); color: #fff;' +
+        ' font-size: 1.1em; font-weight: 700; line-height: 1; }' +
+      '.' + BADGE_CLASS + ' > svg { width: .95em; height: .95em; margin-right: .2em; color: #ffd700; }';
     var style = document.createElement('style');
     style.id = 'trakt-plus-style';
     style.textContent = css;
@@ -1307,14 +1318,72 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  Модуль 6. Ваша оценка на постерах
+  // ─────────────────────────────────────────────────────────────
+
+  var badgeRatings = null;
+
+  function paintBadge(element) {
+    var card = element.card_data;
+    var old = element.querySelector('.' + BADGE_CLASS);
+    var rating = 0;
+    if (card && card.id && badgeRatings && isOn(SETTING.badges, true) && TMDB_SOURCES[card.source || 'tmdb']) {
+      rating = ratingFrom(badgeRatings, kindOf(card), card.id);
+    }
+    if (!rating) {
+      if (old) old.parentNode.removeChild(old);
+      return;
+    }
+    if (old && old.getAttribute('data-rating') === String(rating)) return;
+
+    var view = element.querySelector('.card__view');
+    if (!view) return;
+    var badge = old || document.createElement('div');
+    badge.className = BADGE_CLASS;
+    badge.setAttribute('data-rating', String(rating));
+    badge.innerHTML = STAR_SVG + '<span>' + rating + '</span>';
+    if (!old) view.appendChild(badge);
+  }
+
+  function paintBadgesIn(node) {
+    if (node.nodeType !== 1) return;
+    if (node.classList.contains('card')) return paintBadge(node);
+    if (!node.firstElementChild) return;
+    var cards = node.querySelectorAll('.card');
+    for (var i = 0; i < cards.length; i++) paintBadge(cards[i]);
+  }
+
+  function paintAllBadges() {
+    paintBadgesIn(document.body);
+  }
+
+  function startBadges() {
+    var observer = new MutationObserver(function (mutations) {
+      if (!badgeRatings) return;
+      for (var m = 0; m < mutations.length; m++) {
+        var added = mutations[m].addedNodes;
+        for (var i = 0; i < added.length; i++) paintBadgesIn(added[i]);
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    if (!token()) return;
+    loadRatings(false, function (map) {
+      badgeRatings = map || {};
+      paintAllBadges();
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  Настройки
   // ─────────────────────────────────────────────────────────────
 
-  function addTrigger(name, title, description) {
+  function addTrigger(name, title, description, onChange) {
     Lampa.SettingsApi.addParam({
       component: 'trakt_plus',
       param: { name: name, type: 'trigger', 'default': true },
-      field: { name: title, description: description }
+      field: { name: title, description: description },
+      onChange: onChange
     });
   }
 
@@ -1341,6 +1410,7 @@
     addTrigger(SETTING.markWatched, 'Оценка = просмотрено', 'При оценке отмечать «Просмотрено» в Лампе, а фильм — и в истории Trakt');
     addTrigger(SETTING.autorate,'Оценка после просмотра', 'Предлагать оценку, если досмотрено ' + AUTORATE_THRESHOLD + '% и тайтл не оценён');
     addTrigger(SETTING.autorateShows, 'Оценка после просмотра сериалов', 'Не чаще раза в неделю для одного сериала');
+    addTrigger(SETTING.badges, 'Моя оценка на постерах', 'Звёздочка с вашей оценкой Trakt в углу постера', paintAllBadges);
 
     addButton('trakt_plus_refresh', 'Обновить рекомендации', 'Сбросить кэш списков и оценок', function () {
       clearRecommendationCaches();
@@ -1361,6 +1431,7 @@
     injectStyle();
     addSettings();
     registerRows();
+    startBadges();
 
     Lampa.Listener.follow('full', onFullScreen);
 
