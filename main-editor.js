@@ -194,8 +194,8 @@
   }
 
   // Новый порядок: ряды из сохранённого порядка — по нему, новые — сразу после
-  // ряда, за которым они шли изначально
-  function applyOrder(natural, order) {
+  // ряда, за которым они шли изначально. Новый ряд с row_top (например, баннер) — в самый верх.
+  function applyOrder(natural, order, top) {
     var rank = {};
     order.forEach(function (sig, index) {
       rank[sig] = index;
@@ -206,6 +206,8 @@
       if (rank.hasOwnProperty(sig)) {
         value = rank[sig];
         previous = value;
+      } else if (top && top[sig]) {
+        value = -1;
       } else {
         value = previous + 0.5;
       }
@@ -251,6 +253,7 @@
     var natural = [];
     var originals = {};
     var slots = [];
+    var top = {};
 
     var known = loadKnown(source);
 
@@ -261,14 +264,16 @@
       slots.push(index);
       // Ряды плагинов могут сразу сообщить своё название (row_title)
       if (parts[index].row_title && !known.titles[sig]) known.titles[sig] = parts[index].row_title;
+      if (parts[index].row_top) top[sig] = true;
     });
 
     known.sigs = natural;
+    known.top = top;
     saveKnownLater();
     sessionParts[source] = originals;
 
     var config = loadConfig(source);
-    applyOrder(natural, config.order).forEach(function (sig, position) {
+    applyOrder(natural, config.order, top).forEach(function (sig, position) {
       parts[slots[position]] = config.hidden[sig] ? hiddenPart(sig) : learningPart(source, sig, originals[sig]);
     });
   }
@@ -435,7 +440,7 @@
 
   function currentOrder(source) {
     var known = loadKnown(source);
-    return applyOrder(known.sigs, loadConfig(source).order);
+    return applyOrder(known.sigs, loadConfig(source).order, known.top);
   }
 
   function moveRow(source, sig, targetIndex) {
