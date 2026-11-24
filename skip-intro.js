@@ -7,6 +7,7 @@
  * Поэтому пропускается только тот отрезок, который будет заставкой при любом варианте,
  * а неуверенный хвост заставки — только по кнопке. Кадры сюжета не теряются.
  *
+ * Все отрезки отмечаются на полосе перемотки плеера.
  * Начало титров передаётся плагину next-episode.js: «Следующая серия» появится ровно на титрах.
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
  */
@@ -43,6 +44,7 @@
   var PAL_RATIO = 25 / 23.976;
   var PAL_TOLERANCE = 0.003;
   var CONTROLLER = 'skip_intro';
+  var MARKS_CLASS = 'skip-intro-marks';
 
   var LABELS = {
     intro: { button: 'Пропустить заставку', auto: 'Пропуск заставки через ' },
@@ -403,11 +405,66 @@
         if (current !== item) return;
         var plan = buildPlan(results, duration);
         current.segments = plan.segments;
+        current.credits = plan.credits;
+        current.duration = duration;
+        drawMarks(current);
         if (plan.credits !== null) {
           Lampa.Listener.send('skip_intro', { type: 'credits', start: plan.credits, duration: duration });
         }
       });
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  Отметки на полосе перемотки. Свой слой рядом со слоем отрезков плеера:
+  //  плеер свой слой перерисовывает и наши отметки бы стёр
+  // ─────────────────────────────────────────────────────────────
+
+  var STYLE = '.' + MARKS_CLASS + '{position:absolute;top:0;left:0;right:0;height:100%;pointer-events:none}' +
+    '.' + MARKS_CLASS + ' > div{position:absolute;top:0;height:100%;border-radius:5em;background-color:rgba(110,219,255,.9)}' +
+    '.' + MARKS_CLASS + ' > .skip-intro-mark--maybe{background-color:rgba(110,219,255,.5)}' +
+    '.' + MARKS_CLASS + ' > .skip-intro-mark--credits{background-color:rgba(190,160,255,.9)}';
+
+  function addStyle() {
+    if (document.getElementById('skip-intro-style')) return;
+    var style = document.createElement('style');
+    style.id = 'skip-intro-style';
+    style.textContent = STYLE;
+    document.head.appendChild(style);
+  }
+
+  function marksBox() {
+    var timeline = Lampa.Player.render().find('.player-panel__timeline');
+    if (!timeline.length) return null;
+    var box = timeline.children('.' + MARKS_CLASS);
+    if (!box.length) {
+      box = $('<div class="' + MARKS_CLASS + '"></div>');
+      timeline.append(box);
+    }
+    return box;
+  }
+
+  function clearMarks() {
+    var box = marksBox();
+    if (box) box.empty();
+  }
+
+  function addMark(box, kind, start, end, duration) {
+    var left = Math.max(0, start) / duration * 100;
+    var width = (Math.min(end, duration) - Math.max(0, start)) / duration * 100;
+    if (width <= 0) return;
+    box.append($('<div class="skip-intro-mark--' + kind + '"></div>').css({ left: left + '%', width: width + '%' }));
+  }
+
+  // Яркая отметка — точно заставка, бледная — может быть ещё заставкой (пропуск только кнопкой)
+  function drawMarks(current) {
+    var box = marksBox();
+    if (!box) return;
+    box.empty();
+    current.segments.forEach(function (seg) {
+      addMark(box, seg.auto ? seg.type : 'maybe', seg.start, seg.end, current.duration);
+    });
+    if (current.credits !== null) addMark(box, 'credits', current.credits, current.duration, current.duration);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -543,6 +600,7 @@
 
   function onStart(data) {
     hide();
+    clearMarks();
     var card = currentCard(data);
     var isEpisode = data.season > 0 && data.episode > 0;
     item = {
@@ -590,12 +648,14 @@
   }
 
   function start() {
+    addStyle();
     addSettings();
     addController();
 
     Lampa.Player.listener.follow('start', onStart);
     Lampa.Player.listener.follow('destroy', function () {
       hide();
+      clearMarks();
       item = null;
     });
     Lampa.PlayerVideo.listener.follow('timeupdate', onTime);
