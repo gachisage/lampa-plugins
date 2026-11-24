@@ -18,13 +18,23 @@
   window.gs_skip_intro_loaded = true;
 
   var SETTING_ENABLED = 'skip_intro_enabled';
-  var SETTING_MODE = 'skip_intro_mode';
+  var SETTING_DELAY = 'skip_intro_delay';
+  // Прежняя настройка «автоматически / только кнопкой»: учитывается, пока не выбрана задержка
+  var SETTING_OLD_MODE = 'skip_intro_mode';
   var SETTING_RECAP = 'skip_intro_recap';
-  var MODE_VALUES = {
-    auto: 'Автоматически',
+  var BUTTON_ONLY = 'button';
+  var DELAY_VALUES = {
+    '0': 'Сразу',
+    '3': 'Через 3 секунды',
+    '5': 'Через 5 секунд',
+    '10': 'Через 10 секунд',
     button: 'Только кнопкой'
   };
-  var DEFAULT_MODE = 'auto';
+  var DEFAULT_DELAY = '5';
+  var COMPONENT = 'skip_intro';
+  var ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+    '<path d="M3 5.5v13l8.5-6.5L3 5.5z" fill="currentColor"/>' +
+    '<path d="M12 5.5v13l8.5-6.5L12 5.5z" fill="currentColor"/></svg>';
 
   var CACHE_KEY = 'skip_intro_cache';
   var CACHE_LIMIT = 300;
@@ -34,7 +44,6 @@
 
   // Короткие ролики (трейлеры, клипы) не трогаем
   var MIN_DURATION = 5 * 60;
-  var AUTO_DELAY = 5;
   // Отрезок короче не показываем: кнопка не успеет появиться
   var MIN_SEGMENT = 3;
   // Разница длительностей больше — другой монтаж, автоматике не доверяем
@@ -47,8 +56,8 @@
   var MARKS_CLASS = 'skip-intro-marks';
 
   var LABELS = {
-    intro: { button: 'Пропустить заставку', auto: 'Пропуск заставки через ' },
-    recap: { button: 'Пропустить пересказ', auto: 'Пропуск пересказа через ' }
+    intro: { button: 'Пропустить заставку', auto: 'Пропуск заставки через ', done: 'Заставка пропущена' },
+    recap: { button: 'Пропустить пересказ', auto: 'Пропуск пересказа через ', done: 'Пересказ пропущен' }
   };
 
   var view = null;
@@ -60,8 +69,16 @@
     return value === true || value === 'true';
   }
 
-  function isAutoMode() {
-    return Lampa.Storage.get(SETTING_MODE, DEFAULT_MODE) !== 'button';
+  function defaultDelay() {
+    return Lampa.Storage.get(SETTING_OLD_MODE, '') === BUTTON_ONLY ? BUTTON_ONLY : DEFAULT_DELAY;
+  }
+
+  // Секунды до автопропуска или null — только кнопкой
+  function autoDelay() {
+    var value = String(Lampa.Storage.get(SETTING_DELAY, defaultDelay()));
+    if (value === BUTTON_ONLY) return null;
+    var delay = parseInt(value, 10);
+    return delay >= 0 ? delay : parseInt(DEFAULT_DELAY, 10);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -501,14 +518,14 @@
   }
 
   function willAuto(seg) {
-    return seg.auto && isAutoMode();
+    return seg.auto && autoDelay() !== null;
   }
 
   function show(seg, time) {
     attachView();
     item.shown = seg;
     item.shownAt = time;
-    render(seg, willAuto(seg) ? AUTO_DELAY : null, 0);
+    render(seg, willAuto(seg) ? autoDelay() : null, 0);
     view.root.removeClass('hide');
     if (Lampa.Controller.enabled().name === 'player') Lampa.Controller.toggle(CONTROLLER);
   }
@@ -589,13 +606,18 @@
       if (item.shown) hide();
       return;
     }
+    var delay = willAuto(seg) ? autoDelay() : null;
+    if (delay === 0) {
+      Lampa.Noty.show(LABELS[seg.type].done);
+      return skip(seg);
+    }
     if (item.shown !== seg) show(seg, time);
-    if (!willAuto(seg)) return;
+    if (delay === null) return;
 
     if (time < item.shownAt) item.shownAt = time;
     var passed = time - item.shownAt;
-    if (passed >= AUTO_DELAY) return skip(seg);
-    render(seg, Math.ceil(AUTO_DELAY - passed), passed / AUTO_DELAY);
+    if (passed >= delay) return skip(seg);
+    render(seg, Math.ceil(delay - passed), passed / delay);
   }
 
   function onStart(data) {
@@ -621,24 +643,25 @@
 
   function addSettings() {
     if (!Lampa.SettingsApi) return;
+    Lampa.SettingsApi.addComponent({ component: COMPONENT, name: 'Пропуск заставок', icon: ICON });
     Lampa.SettingsApi.addParam({
-      component: 'player',
+      component: COMPONENT,
       param: { name: SETTING_ENABLED, type: 'trigger', 'default': true },
       field: {
-        name: 'Пропуск заставок',
-        description: 'Кнопка «Пропустить заставку» в сериалах. Таймкоды из SkipDB и TheIntroDB'
+        name: 'Пропускать заставки',
+        description: 'В сериалах. Таймкоды из SkipDB и TheIntroDB'
       }
     });
     Lampa.SettingsApi.addParam({
-      component: 'player',
-      param: { name: SETTING_MODE, type: 'select', values: MODE_VALUES, 'default': DEFAULT_MODE },
+      component: COMPONENT,
+      param: { name: SETTING_DELAY, type: 'select', values: DELAY_VALUES, 'default': defaultDelay() },
       field: {
-        name: 'Как пропускать заставку',
-        description: 'Автоматически — через 5 секунд, «Назад» отменяет'
+        name: 'Когда пропускать',
+        description: 'Пока идёт отсчёт: ОК — пропустить сразу, «Назад» — досмотреть заставку'
       }
     });
     Lampa.SettingsApi.addParam({
-      component: 'player',
+      component: COMPONENT,
       param: { name: SETTING_RECAP, type: 'trigger', 'default': true },
       field: {
         name: 'Пропускать «Ранее в сериале»',
