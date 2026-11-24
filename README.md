@@ -14,7 +14,13 @@
 
 ## Установка
 
-Настройки → Расширения → Добавить плагин:
+**Все сразу — одной ссылкой:** Настройки → Расширения → Добавить плагин →
+
+`https://gachisage.github.io/lampa-plugins/all.js`
+
+После перезапуска Лампы появятся все плагины ниже. Обновления приходят сами.
+
+Или по одному:
 
 - `https://gachisage.github.io/lampa-plugins/trakt-plus.js`
 - `https://gachisage.github.io/lampa-plugins/main-editor.js`
