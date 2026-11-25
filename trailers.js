@@ -22,7 +22,6 @@
   var COMPONENT = 'gs_trailers';
   var SETTING_ENABLED = 'gs_trailers_enabled';
   var SETTING_KEY = 'gs_trailers_youtube_key';
-  var STORAGE_MIRROR = 'gs_trailers_mirror';
   var CACHE_KEY = 'gs_trailers_cache';
   var CACHE_LIMIT = 200;
   var CACHE_TTL = 7 * 24 * 3600 * 1000;
@@ -214,35 +213,43 @@
     });
   }
 
-  // Зеркала по очереди, начиная с последнего рабочего
+  // Все зеркала сразу: берётся первый ответ, мёртвое зеркало не задерживает поиск
   function searchPiped(query, done) {
-    var last = Lampa.Storage.get(STORAGE_MIRROR, '');
-    var mirrors = PIPED_MIRRORS.slice().sort(function (a, b) {
-      return (b === last) - (a === last);
-    });
-    var next = function (index) {
-      if (index >= mirrors.length) return done(null);
-      var url = mirrors[index] + '/search?filter=videos&q=' + encodeURIComponent(query);
-      getText(url, function (text) {
+    var left = PIPED_MIRRORS.length;
+    var finished = false;
+    PIPED_MIRRORS.forEach(function (mirror) {
+      getText(mirror + '/search?filter=videos&q=' + encodeURIComponent(query), function (text) {
+        if (finished) return;
         var list = parsePiped(text);
-        if (!list) return next(index + 1);
-        Lampa.Storage.set(STORAGE_MIRROR, mirrors[index]);
-        done(list);
+        left--;
+        if (list || !left) {
+          finished = true;
+          done(list);
+        }
+      });
+    });
+  }
+
+  // Способы по очереди: если один не сработал, пробуем следующий
+  function searchYoutube(query, done) {
+    var key = String(Lampa.Storage.get(SETTING_KEY, '') || '').trim();
+    var ways = [];
+    if (canNative()) ways.push(searchNative);
+    if (key) {
+      ways.push(function (text, callback) {
+        searchApi(text, key, callback);
+      });
+    }
+    ways.push(searchPiped);
+
+    var next = function (index) {
+      if (index >= ways.length) return done(null);
+      ways[index](query, function (list) {
+        if (list) done(list);
+        else next(index + 1);
       });
     };
     next(0);
-  }
-
-  function searchYoutube(query, done) {
-    var key = String(Lampa.Storage.get(SETTING_KEY, '') || '').trim();
-    if (canNative()) return searchNative(query, done);
-    if (key) {
-      return searchApi(query, key, function (list) {
-        if (list) done(list);
-        else searchPiped(query, done);
-      });
-    }
-    searchPiped(query, done);
   }
 
   // ─────────────────────────────────────────────────────────────
