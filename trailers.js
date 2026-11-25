@@ -5,6 +5,9 @@
  * Плагин ищет русские трейлеры и ставит их в начало списка «Трейлеры»,
  * английские из TMDB остаются ниже. Работает для фильмов, сериалов и мультфильмов.
  *
+ * Сначала трейлеры ищутся на ivi: лицензионные, с русским дубляжом, MP4 до 1080p с выбором
+ * качества. База ivi — в основном российское кино и то, что сейчас есть в их каталоге.
+ *
  * В приложении Лампы (Android, ТВ) трейлеры берутся с RuTube: в России он грузится быстро,
  * видео до 1080p играет в плеере Лампы с выбором качества. Из обычного браузера RuTube
  * недоступен (закрыт CORS), там и если на RuTube ничего не нашлось — поиск на YouTube.
@@ -15,7 +18,8 @@
  *   — иначе через открытые зеркала YouTube (Piped). Зеркала бывают недоступны,
  *     тогда в списке остаются трейлеры из TMDB.
  *
- * Трейлер запускается сам: не нужно ждать «Загрузка…» и нажимать «Плей».
+ * Трейлер запускается сам: не нужно ждать «Загрузка…» и нажимать «Плей». Панель управления
+ * YouTube выключена: управляет плеер Лампы, а панель YouTube проступала полосой посреди видео.
  *
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
  */
@@ -38,6 +42,16 @@
   var MAX_RESULTS = 6;
   var MIN_DURATION = 20;
   var MAX_DURATION = 7 * 60;
+  var IVI_API = 'https://api.ivi.ru/mobileapi';
+  var IVI_APP = 'app_version=870';
+  var IVI_MAX = 4;
+  var IVI_QUALITY = [
+    ['MP4-HD1080', '1080p'],
+    ['MP4-HD720', '720p'],
+    ['MP4-SHQ', '480p'],
+    ['MP4-hi', '360p'],
+    ['MP4-lo', '240p']
+  ];
   var RUTUBE_API = 'https://rutube.ru/api';
   var RUTUBE_REFERER = 'https%3A%2F%2Frutube.ru';
   var PIPED_MIRRORS = [
@@ -60,7 +74,7 @@
     '<path d="M10 9v6l5-3-5-3z" fill="currentColor"/></svg>';
 
   var pending = {};
-  var crossOriginWatch = null;
+  var noCors = false;
 
   function isOn(name, defaultValue) {
     var value = Lampa.Storage.get(name, defaultValue ? 'true' : 'false');
@@ -146,6 +160,79 @@
     if (canNative()) getNative(url, done);
     else if (isLocalApp()) getText(url, done);
     else done(null);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  ivi: открытое API (CORS разрешён), трейлеры — прямые MP4 разных качеств
+  // ─────────────────────────────────────────────────────────────
+
+  function iviGet(path, done) {
+    getText(IVI_API + path + (path.indexOf('?') < 0 ? '?' : '&') + IVI_APP, function (text) {
+      done(text ? parseJson(text) : null);
+    });
+  }
+
+  // Название совпадает целиком, тип тот же, годы пересекаются: у ivi много одноимённых передач
+  function iviMatches(entry, card) {
+    if (!entry || !entry.id || (entry.kind === 2) !== card.isTv) return false;
+    if (normalize(entry.title) !== normalize(card.title)) return false;
+    var years = entry.years || (entry.year ? [entry.year] : []);
+    if (!card.year || !years.length) return true;
+    var from = card.year - 1;
+    var to = (card.isTv ? card.lastYear || card.year : card.year) + 1;
+    return years.some(function (year) {
+      return year >= from && year <= to;
+    });
+  }
+
+  // { '1080p': url, … } от лучшего к худшему — в таком порядке их покажет меню качества
+  function iviQuality(files) {
+    var quality = {};
+    IVI_QUALITY.forEach(function (pair) {
+      var file = files.filter(function (entry) {
+        return entry.content_format === pair[0] && entry.url;
+      })[0];
+      if (file) quality[pair[1]] = file.url;
+    });
+    return quality;
+  }
+
+  function iviTrailers(data, card) {
+    return data.filter(function (entry) {
+      return entry.data_type === 'trailer' && !entry.is_paid && entry.files && entry.files.length;
+    }).map(function (entry) {
+      return {
+        title: card.title + ' — ' + (entry.title || 'Трейлер'),
+        duration: parseClock(entry.duration),
+        preview: entry.preview || '',
+        quality: iviQuality(entry.files)
+      };
+    }).filter(function (trailer) {
+      return Object.keys(trailer.quality).length;
+    }).slice(0, IVI_MAX);
+  }
+
+  // done(трейлеры ivi). Запоминается только номер тайтла: ссылки на файлы у ivi со сроком действия
+  function findIvi(card, done) {
+    var key = 'ivi:' + card.key;
+    var load = function (id) {
+      var path = (card.isTv ? '/compilationinfo' : '/videoinfo') + '/v5/?id=' + id + '&fields=additional_data';
+      iviGet(path, function (json) {
+        var data = json && json.result && json.result.additional_data;
+        done(data && data.length ? iviTrailers(data, card) : []);
+      });
+    };
+    var cached = cacheGet(key);
+    if (cached) return load(cached[0]);
+
+    iviGet('/search/v7/?query=' + encodeURIComponent(card.title) + '&from=0&to=20&fields=id,title,kind,year,years', function (json) {
+      var hit = ((json && json.result) || []).filter(function (entry) {
+        return iviMatches(entry, card);
+      })[0];
+      if (!hit) return done([]);
+      cacheSet(key, [hit.id]);
+      load(hit.id);
+    });
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -512,6 +599,22 @@
     };
   }
 
+  function iviItem(trailer) {
+    var names = Object.keys(trailer.quality);
+    var url = (Lampa.Player.getUrlQuality && Lampa.Player.getUrlQuality(trailer.quality)) || trailer.quality[names[0]];
+    var item = {
+      title: trailer.title,
+      subtitle: ['ivi', formatDuration(trailer.duration), 'до ' + names[0]].filter(Boolean).join(' · '),
+      url: url,
+      ivi: true,
+      icon: trailer.preview ? '<img class="size-youtube" src="' + trailer.preview + '" />' : '',
+      template: 'selectbox_icon',
+      thumbnail: trailer.preview
+    };
+    if (names.length > 1) item.quality = trailer.quality;
+    return item;
+  }
+
   function rutubeItem(video, subtitle) {
     var thumb = video.thumb ? video.thumb + (video.thumb.indexOf('?') < 0 ? '?size=s' : '') : '';
     return {
@@ -540,9 +643,9 @@
     return item;
   }
 
-  function buildItems(found, tmdbVideos) {
+  function buildItems(ivi, found, tmdbVideos) {
     var ids = {};
-    var russian = [];
+    var russian = ivi.map(iviItem);
     found.forEach(function (video) {
       ids[video.id] = true;
       russian.push(russianItem(video));
@@ -576,23 +679,31 @@
     if (promise && typeof promise['catch'] === 'function') promise['catch'](function () {});
   }
 
-  function stopCrossOriginWatch() {
-    if (crossOriginWatch) crossOriginWatch.disconnect();
-    crossOriginWatch = null;
+  // Мост YouTube в Лампе включает панель управления YouTube, и при движении мыши она проступает
+  // полосой посреди видео. Управляет плеером всё равно Лампа, поэтому панель YouTube выключаем
+  function hideYoutubeControls(frame) {
+    var src = frame.getAttribute('src') || '';
+    if (src.indexOf('controls=1') >= 0) frame.setAttribute('src', src.replace('controls=1', 'controls=0'));
   }
 
-  function watchCrossOrigin() {
-    stopCrossOriginWatch();
-    if (typeof MutationObserver === 'undefined') return;
-    var root = Lampa.Player.render ? $(Lampa.Player.render())[0] : null;
-    var node = root || document.body;
-    var fix = function () {
-      var videos = node.querySelectorAll('video');
-      for (var i = 0; i < videos.length; i++) allowNoCors(videos[i]);
-    };
-    crossOriginWatch = new MutationObserver(fix);
-    crossOriginWatch.observe(node, { childList: true, subtree: true });
-    fix();
+  function playerRoot() {
+    return Lampa.Player.render ? $(Lampa.Player.render())[0] || null : null;
+  }
+
+  function fixPlayer() {
+    var root = playerRoot();
+    if (!root) return;
+    var frames = root.querySelectorAll('.' + BRIDGE_FRAME);
+    for (var i = 0; i < frames.length; i++) hideYoutubeControls(frames[i]);
+    if (!noCors) return;
+    var videos = root.querySelectorAll('video');
+    for (var j = 0; j < videos.length; j++) allowNoCors(videos[j]);
+  }
+
+  function watchPlayer() {
+    var root = playerRoot();
+    if (!root || typeof MutationObserver === 'undefined') return;
+    new MutationObserver(fixPlayer).observe(root, { childList: true, subtree: true });
   }
 
   function playRutube(item) {
@@ -611,7 +722,8 @@
       // Плейлист RuTube подписан и без CORS: играем средствами самого видео, без hls.js
       var data = { title: item.title, url: stream.url, hls_type: 'native' };
       if (stream.quality) data.quality = stream.quality;
-      watchCrossOrigin();
+      noCors = true;
+      fixPlayer();
       Lampa.Player.play(data);
       Lampa.Player.playlist([data]);
     });
@@ -623,23 +735,29 @@
       playRutube(item);
       return;
     }
-    if (Lampa.Platform.is('android') && Lampa.Storage.field('player_launch_trailers') === 'youtube' && Lampa.Android) {
+    if (item.youtube && Lampa.Platform.is('android') && Lampa.Storage.field('player_launch_trailers') === 'youtube' && Lampa.Android) {
       Lampa.Android.openYoutube(item.id);
       return;
     }
     Lampa.Player.play(item);
     Lampa.Player.playlist(items.filter(function (entry) {
-      return entry.youtube;
+      return !!entry.url;
     }));
   }
 
   function showList(card, tmdbVideos) {
+    var cancelled = false;
+    var left = 2;
+    var ivi = [];
+    var found = [];
     Lampa.Loading.start(function () {
+      cancelled = true;
       Lampa.Loading.stop();
     });
-    findTrailers(card, function (found) {
+    var ready = function () {
+      if (--left || cancelled) return;
       Lampa.Loading.stop();
-      var items = buildItems(found, tmdbVideos);
+      var items = buildItems(ivi, found, tmdbVideos);
       if (!items.length) {
         Lampa.Noty.show('Трейлеры не найдены');
         return;
@@ -654,6 +772,14 @@
           Lampa.Controller.toggle('content');
         }
       });
+    };
+    findIvi(card, function (list) {
+      ivi = list;
+      ready();
+    });
+    findTrailers(card, function (list) {
+      found = list;
+      ready();
     });
   }
 
@@ -750,7 +876,10 @@
     addSettings();
     Lampa.Listener.follow('full', onFull);
     window.addEventListener('message', onBridgeMessage);
-    Lampa.Player.listener.follow('destroy', stopCrossOriginWatch);
+    Lampa.Player.listener.follow('destroy', function () {
+      noCors = false;
+    });
+    watchPlayer();
   }
 
   if (window.appready) start();
