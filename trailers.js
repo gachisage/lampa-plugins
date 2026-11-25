@@ -2,8 +2,12 @@
  * Русские трейлеры (Lampa).
  *
  * В TMDB русских трейлеров почти нет, поэтому в карточке были только английские.
- * Плагин ищет русские трейлеры на YouTube и ставит их в начало списка «Трейлеры»,
+ * Плагин ищет русские трейлеры и ставит их в начало списка «Трейлеры»,
  * английские из TMDB остаются ниже. Работает для фильмов, сериалов и мультфильмов.
+ *
+ * В приложении Лампы (Android, ТВ) трейлеры берутся с RuTube: в России он грузится быстро,
+ * видео до 1080p играет в плеере Лампы с выбором качества. Из обычного браузера RuTube
+ * недоступен (закрыт CORS), там и если на RuTube ничего не нашлось — поиск на YouTube.
  *
  * Поиск на YouTube:
  *   — в Android-приложении Лампы — напрямую;
@@ -34,6 +38,8 @@
   var MAX_RESULTS = 6;
   var MIN_DURATION = 20;
   var MAX_DURATION = 7 * 60;
+  var RUTUBE_API = 'https://rutube.ru/api';
+  var RUTUBE_REFERER = 'https%3A%2F%2Frutube.ru';
   var PIPED_MIRRORS = [
     'https://api.piped.private.coffee',
     'https://pipedapi.ducks.party',
@@ -54,6 +60,7 @@
     '<path d="M10 9v6l5-3-5-3z" fill="currentColor"/></svg>';
 
   var pending = {};
+  var crossOriginWatch = null;
 
   function isOn(name, defaultValue) {
     var value = Lampa.Storage.get(name, defaultValue ? 'true' : 'false');
@@ -119,6 +126,86 @@
     } catch (e) {
       done(null);
     }
+  }
+
+  // Приложения Лампы для ТВ открываются с локального адреса — там CORS нет
+  function isLocalApp() {
+    try {
+      return /^(file|widget|local):$/i.test(window.location.protocol || '');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function canDirect() {
+    return canNative() || isLocalApp();
+  }
+
+  // Запрос мимо CORS; в обычном браузере такого способа нет — done(null)
+  function getDirect(url, done) {
+    if (canNative()) getNative(url, done);
+    else if (isLocalApp()) getText(url, done);
+    else done(null);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  RuTube: поиск и прямой поток HLS с несколькими качествами
+  // ─────────────────────────────────────────────────────────────
+
+  function parseRutube(text) {
+    var json = parseJson(text);
+    if (!json || !json.results) return null;
+    return json.results.filter(function (video) {
+      return video && video.id && !video.is_adult && !video.is_hidden;
+    }).map(function (video) {
+      return {
+        id: String(video.id),
+        title: video.title || '',
+        duration: video.duration || 0,
+        channel: (video.author && video.author.name) || '',
+        thumb: video.thumbnail_url || '',
+        source: 'rutube'
+      };
+    });
+  }
+
+  function searchRutube(query, done) {
+    getDirect(RUTUBE_API + '/search/video/?query=' + encodeURIComponent(query), function (text) {
+      done(text ? parseRutube(text) : null);
+    });
+  }
+
+  // { '1080p': url, '720p': url, … } из главного плейлиста HLS
+  function parseLevels(playlist) {
+    var lines = playlist.split('\n');
+    var quality = {};
+    for (var i = 0; i < lines.length - 1; i++) {
+      var match = lines[i].match(/^#EXT-X-STREAM-INF:.*RESOLUTION=\d+x(\d+)/);
+      var url = lines[i + 1].trim();
+      if (!match || !/^https?:\/\//.test(url)) continue;
+      var name = match[1] + 'p';
+      if (!quality[name]) quality[name] = url;
+    }
+    return quality;
+  }
+
+  // done({ url, quality } или null). Ссылки подписаны под адрес зрителя, поэтому берутся перед запуском
+  function rutubeStream(id, done) {
+    var url = RUTUBE_API + '/play/options/' + id + '/?no_404=true&referer=' + RUTUBE_REFERER;
+    getDirect(url, function (text) {
+      var json = parseJson(text);
+      var balancer = json && json.video_balancer;
+      var master = balancer && (balancer.m3u8 || balancer['default']);
+      if (!master) return done(null);
+      getDirect(master, function (playlist) {
+        var quality = playlist ? parseLevels(playlist) : {};
+        var several = Object.keys(quality).length > 1;
+        done({
+          url: (several && Lampa.Player.getUrlQuality && Lampa.Player.getUrlQuality(quality)) || master,
+          quality: several ? quality : null
+        });
+      });
+    });
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -365,22 +452,35 @@
     };
   }
 
-  // done(список трейлеров); пока поиск идёт, повторные вызовы ждут тот же ответ
+  // done(список трейлеров); пока поиск идёт, повторные вызовы ждут тот же ответ.
+  // Сначала RuTube, если до него можно достучаться, иначе или если там пусто — YouTube
   function findTrailers(card, done) {
-    var cached = cacheGet(card.key);
+    var key = card.key + (canDirect() ? ':rutube' : '');
+    var cached = cacheGet(key);
     if (cached) return done(cached);
-    if (pending[card.key]) return pending[card.key].push(done);
-    pending[card.key] = [done];
+    if (pending[key]) return pending[key].push(done);
+    pending[key] = [done];
 
     var query = card.title + ' ' + (card.year || '') + ' русский трейлер';
-    searchYoutube(query, function (list) {
-      var trailers = list ? pickTrailers(list, card) : [];
-      if (trailers.length) cacheSet(card.key, trailers);
-      var waiting = pending[card.key];
-      delete pending[card.key];
+    var finish = function (trailers) {
+      if (trailers.length) cacheSet(key, trailers);
+      var waiting = pending[key];
+      delete pending[key];
       waiting.forEach(function (callback) {
         callback(trailers);
       });
+    };
+    var youtube = function () {
+      searchYoutube(query, function (list) {
+        finish(list ? pickTrailers(list, card) : []);
+      });
+    };
+
+    if (!canDirect()) return youtube();
+    searchRutube(query, function (list) {
+      var trailers = list ? pickTrailers(list, card) : [];
+      if (trailers.length) finish(trailers);
+      else youtube();
     });
   }
 
@@ -412,8 +512,22 @@
     };
   }
 
+  function rutubeItem(video, subtitle) {
+    var thumb = video.thumb ? video.thumb + (video.thumb.indexOf('?') < 0 ? '?size=s' : '') : '';
+    return {
+      title: Lampa.Utils.shortText(video.title, 50),
+      subtitle: subtitle ? subtitle + ' · RuTube' : 'RuTube',
+      id: video.id,
+      rutube: true,
+      icon: thumb ? '<img class="size-youtube" src="' + thumb + '" />' : '',
+      template: 'selectbox_icon',
+      thumbnail: thumb
+    };
+  }
+
   function russianItem(video) {
     var subtitle = [video.channel, formatDuration(video.duration)].filter(Boolean).join(' · ');
+    if (video.source === 'rutube') return rutubeItem(video, subtitle);
     return youtubeItem(video.id, video.title, subtitle, video.time);
   }
 
@@ -451,15 +565,71 @@
     return russian.concat(other);
   }
 
+  // Веб-плеер Лампы ставит видео crossorigin="anonymous", а CDN RuTube не отдаёт заголовков CORS —
+  // с этим атрибутом поток не грузится. Пока играет трейлер RuTube, снимаем его с каждого нового видео
+  function allowNoCors(video) {
+    if (!video.hasAttribute('crossorigin')) return;
+    video.removeAttribute('crossorigin');
+    if (!video.getAttribute('src')) return;
+    video.load();
+    var promise = video.play();
+    if (promise && typeof promise['catch'] === 'function') promise['catch'](function () {});
+  }
+
+  function stopCrossOriginWatch() {
+    if (crossOriginWatch) crossOriginWatch.disconnect();
+    crossOriginWatch = null;
+  }
+
+  function watchCrossOrigin() {
+    stopCrossOriginWatch();
+    if (typeof MutationObserver === 'undefined') return;
+    var root = Lampa.Player.render ? $(Lampa.Player.render())[0] : null;
+    var node = root || document.body;
+    var fix = function () {
+      var videos = node.querySelectorAll('video');
+      for (var i = 0; i < videos.length; i++) allowNoCors(videos[i]);
+    };
+    crossOriginWatch = new MutationObserver(fix);
+    crossOriginWatch.observe(node, { childList: true, subtree: true });
+    fix();
+  }
+
+  function playRutube(item) {
+    var cancelled = false;
+    Lampa.Loading.start(function () {
+      cancelled = true;
+      Lampa.Loading.stop();
+    });
+    rutubeStream(item.id, function (stream) {
+      if (cancelled) return;
+      Lampa.Loading.stop();
+      if (!stream) {
+        Lampa.Noty.show('Не удалось открыть трейлер на RuTube');
+        return;
+      }
+      // Плейлист RuTube подписан и без CORS: играем средствами самого видео, без hls.js
+      var data = { title: item.title, url: stream.url, hls_type: 'native' };
+      if (stream.quality) data.quality = stream.quality;
+      watchCrossOrigin();
+      Lampa.Player.play(data);
+      Lampa.Player.playlist([data]);
+    });
+  }
+
   function play(item, items) {
     Lampa.Controller.toggle('content');
+    if (item.rutube) {
+      playRutube(item);
+      return;
+    }
     if (Lampa.Platform.is('android') && Lampa.Storage.field('player_launch_trailers') === 'youtube' && Lampa.Android) {
       Lampa.Android.openYoutube(item.id);
       return;
     }
     Lampa.Player.play(item);
     Lampa.Player.playlist(items.filter(function (entry) {
-      return !entry.separator;
+      return entry.youtube;
     }));
   }
 
@@ -555,7 +725,7 @@
       param: { name: SETTING_ENABLED, type: 'trigger', 'default': true },
       field: {
         name: 'Русские трейлеры',
-        description: 'Искать русские трейлеры на YouTube и показывать их первыми'
+        description: 'Искать русские трейлеры (в приложении — на RuTube, в браузере — на YouTube) и показывать их первыми'
       }
     });
     Lampa.SettingsApi.addParam({
@@ -580,6 +750,7 @@
     addSettings();
     Lampa.Listener.follow('full', onFull);
     window.addEventListener('message', onBridgeMessage);
+    Lampa.Player.listener.follow('destroy', stopCrossOriginWatch);
   }
 
   if (window.appready) start();
