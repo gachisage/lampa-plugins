@@ -11,6 +11,8 @@
  *   — иначе через открытые зеркала YouTube (Piped). Зеркала бывают недоступны,
  *     тогда в списке остаются трейлеры из TMDB.
  *
+ * Трейлер запускается сам: не нужно ждать «Загрузка…» и нажимать «Плей».
+ *
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
  */
 (function () {
@@ -22,6 +24,9 @@
   var COMPONENT = 'gs_trailers';
   var SETTING_ENABLED = 'gs_trailers_enabled';
   var SETTING_KEY = 'gs_trailers_youtube_key';
+  var SETTING_AUTOPLAY = 'gs_trailers_autoplay';
+  var BRIDGE_FRAME = 'player-video__youtube-bridge-frame';
+  var BRIDGE_STARTED = 'gs_trailers_started';
   var CACHE_KEY = 'gs_trailers_cache';
   var CACHE_LIMIT = 200;
   var CACHE_TTL = 7 * 24 * 3600 * 1000;
@@ -516,6 +521,29 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  Автозапуск. Встроенный YouTube-плеер Лампы ждёт нажатия «Плей»
+  //  и 10 секунд показывает «Загрузка…». Как только плеер YouTube готов,
+  //  отправляем ему ту же команду, что и кнопка «Плей»
+  // ─────────────────────────────────────────────────────────────
+
+  function bridgeFrame(source) {
+    var frames = document.querySelectorAll('.' + BRIDGE_FRAME);
+    for (var i = 0; i < frames.length; i++) {
+      if (frames[i].contentWindow === source) return frames[i];
+    }
+    return null;
+  }
+
+  function onBridgeMessage(event) {
+    var data = event.data;
+    if (!data || data.type !== 'ready' || !data.bridgeId || !isOn(SETTING_AUTOPLAY, true)) return;
+    var frame = bridgeFrame(event.source);
+    if (!frame || frame[BRIDGE_STARTED] === data.bridgeId) return;
+    frame[BRIDGE_STARTED] = data.bridgeId;
+    frame.contentWindow.postMessage({ bridgeId: data.bridgeId, type: 'play', data: {} }, '*');
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  Настройки и запуск
   // ─────────────────────────────────────────────────────────────
 
@@ -532,6 +560,14 @@
     });
     Lampa.SettingsApi.addParam({
       component: COMPONENT,
+      param: { name: SETTING_AUTOPLAY, type: 'trigger', 'default': true },
+      field: {
+        name: 'Запускать сразу',
+        description: 'Трейлер начинает играть сам, без нажатия «Плей»'
+      }
+    });
+    Lampa.SettingsApi.addParam({
+      component: COMPONENT,
       param: { name: SETTING_KEY, type: 'input', values: '', placeholder: 'Не обязательно', 'default': '' },
       field: {
         name: 'Ключ YouTube API',
@@ -543,6 +579,7 @@
   function start() {
     addSettings();
     Lampa.Listener.follow('full', onFull);
+    window.addEventListener('message', onBridgeMessage);
   }
 
   if (window.appready) start();

@@ -8,6 +8,8 @@
  * В карточке сериала появляется кнопка «Продолжить S5E2» с тем же действием.
  * На главной обычный ряд «Продолжить просмотр» заменяется широким: кадр из серии,
  * номер и название серии, сколько осталось и полоска прогресса.
+ * «Не смотрел» (кнопка в карточке фильма и долгое нажатие на карточку в широком ряду)
+ * убирает случайный просмотр: тайм-код, историю Лампы и прогресс в Trakt.
  *
  * Если что-то пошло не так (нет BWA, серия не нашлась), остаётся открытым список серий BWA.
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
@@ -43,6 +45,15 @@
   var WIDE_IMAGE_SIZE = 'w780';
   var WATCHED_PERCENT = 90;
   var TMDB_SOURCES = { tmdb: true, cub: true };
+
+  var UNWATCH_CLASS = 'continue-watch-unwatch';
+  var UNWATCH_TITLE = 'Не смотрел';
+  var UNWATCH_SHOW_TITLE = 'Убрать из «Продолжить просмотр»';
+  var UNWATCH_HINT = 'Сбросить тайм-код, историю и прогресс в Trakt';
+  var RECENT_HISTORY = 24 * 3600 * 1000;
+  var UNWATCH_SVG = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" d="M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c5 0 9 4.5 10 7-.4 1-1.2 2.3-2.3 3.5' +
+    'M6.6 6.6C4.4 8 2.8 10.2 2 12c1 2.5 5 7 10 7 1.9 0 3.6-.6 5-1.5M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
 
   var WIDE_STYLE = [
     '.items-line--type-continue-wide .scroll__body{padding-bottom:.6em}',
@@ -104,7 +115,7 @@
     return String(id || '').trim() || DEFAULT_CLIENT_ID;
   }
 
-  function traktGet(path, onSuccess, onError) {
+  function traktRequest(method, path, body, onSuccess, onError) {
     function attempt(direct) {
       var headers = {
         'Content-Type': 'application/json',
@@ -116,12 +127,18 @@
 
       $.ajax({
         url: (direct ? DIRECT_BASE : PROXY_BASE) + path,
-        type: 'GET',
+        type: method,
         headers: headers,
+        data: body ? JSON.stringify(body) : undefined,
         dataType: 'json',
         timeout: REQUEST_TIMEOUT,
         success: onSuccess,
         error: function (xhr) {
+          // Удаление отвечает 204 без тела — для jQuery это ошибка разбора JSON
+          if (xhr && xhr.status >= 200 && xhr.status < 300) {
+            onSuccess(null);
+            return;
+          }
           if (direct && (!xhr || xhr.status === 0)) {
             corsFree = false;
             attempt(false);
@@ -132,6 +149,10 @@
       });
     }
     attempt(corsFree);
+  }
+
+  function traktGet(path, onSuccess, onError) {
+    traktRequest('GET', path, null, onSuccess, onError);
   }
 
   function traktShowId(card, callback) {
@@ -419,13 +440,21 @@
     return card.original_name || card.original_title || '';
   }
 
+  function movieHash(card) {
+    return Lampa.Utils.hash(hashTitle(card));
+  }
+
+  function episodeHash(card, target) {
+    var season = target.season;
+    return Lampa.Utils.hash([season, season > 10 ? ':' : '', target.number, hashTitle(card)].join(''));
+  }
+
   function movieTime(card) {
-    return Lampa.Timeline.view(Lampa.Utils.hash(hashTitle(card)));
+    return Lampa.Timeline.view(movieHash(card));
   }
 
   function episodeTime(card, target) {
-    var season = target.season;
-    return Lampa.Timeline.view(Lampa.Utils.hash([season, season > 10 ? ':' : '', target.number, hashTitle(card)].join('')));
+    return Lampa.Timeline.view(episodeHash(card, target));
   }
 
   function tmdbId(card) {
@@ -517,6 +546,7 @@
     root.card_data = this.card;
     root.addEventListener('visible', function () { self.load(); });
     root.addEventListener('hover:enter', function () { self.open(); });
+    root.addEventListener('hover:long', function () { self.menu(); });
     this.html = root;
   };
 
@@ -578,6 +608,40 @@
       card: card,
       source: card.source || 'tmdb'
     });
+  };
+
+  WideCard.prototype.menu = function () {
+    var self = this;
+    var card = this.card;
+    var controller = Lampa.Controller.enabled().name;
+    Lampa.Select.show({
+      title: card.title || card.name,
+      items: [
+        { title: isShow(card) ? UNWATCH_SHOW_TITLE : UNWATCH_TITLE, subtitle: UNWATCH_HINT, unwatch: true },
+        { title: 'Открыть карточку' }
+      ],
+      onSelect: function (item) {
+        Lampa.Controller.toggle(controller);
+        if (!item.unwatch) return self.open();
+        unwatch(card, self.target);
+        self.hide(controller);
+      },
+      onBack: function () {
+        Lampa.Controller.toggle(controller);
+      }
+    });
+  };
+
+  // Ряд перестроится при следующем открытии главной, а пока карточку просто прячем
+  WideCard.prototype.hide = function (controller) {
+    var root = this.html;
+    if (!root) return;
+    // Фокус уводим, пока карточка ещё видна: ряд запоминает последнюю карточку в фокусе
+    if (root.nextElementSibling) Lampa.Controller.move('right');
+    else if (root.previousElementSibling) Lampa.Controller.move('left');
+    root.classList.remove('selector');
+    root.style.display = 'none';
+    Lampa.Controller.toggle(controller);
   };
 
   WideCard.prototype.render = function (js) {
@@ -658,6 +722,71 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  «Не смотрел»: убрать случайный просмотр — тайм-код, историю Лампы
+  //  и прогресс в Trakt. Отметки «просмотрено» в Trakt снимаются, только если они за последние сутки
+  // ─────────────────────────────────────────────────────────────
+
+  function noop() {}
+
+  function sameTmdb(media, card) {
+    return !!(media && media.ids && String(media.ids.tmdb) === String(card.id));
+  }
+
+  function forgetTrakt(card, show) {
+    if (!token()) return;
+    traktGet('/sync/playback/' + (show ? 'episodes' : 'movies'), function (items) {
+      (items || []).forEach(function (item) {
+        if (sameTmdb(show ? item.show : item.movie, card)) traktRequest('DELETE', '/sync/playback/' + item.id, null, noop, noop);
+      });
+    }, noop);
+    if (show) return;
+
+    var since = new Date(Date.now() - RECENT_HISTORY).toISOString();
+    traktGet('/sync/history/movies?start_at=' + encodeURIComponent(since), function (items) {
+      var ids = (items || []).filter(function (item) {
+        return sameTmdb(item.movie, card);
+      }).map(function (item) {
+        return item.id;
+      });
+      if (ids.length) traktRequest('POST', '/sync/history/remove', { ids: ids }, noop, noop);
+    }, noop);
+  }
+
+  function unwatch(card, target) {
+    var show = isShow(card);
+    if (!show) Lampa.Timeline.update({ hash: movieHash(card), percent: 0, time: 0, duration: 0 });
+    else if (target) Lampa.Timeline.update({ hash: episodeHash(card, target), percent: 0, time: 0, duration: 0 });
+    Lampa.Favorite.remove('history', card);
+    forgetTrakt(card, show);
+    delete progressCache[card.id];
+    notify(show ? 'Убрано из «Продолжить просмотр»' : 'Отмечено как непросмотренное');
+  }
+
+  function addUnwatchButton(event) {
+    var card = event.data && event.data.movie;
+    if (!card || isShow(card) || !(movieTime(card).percent > 0)) return;
+
+    var buttons = event.object.activity.render().find('.full-start-new__buttons');
+    if (!buttons.length || buttons.find('.' + UNWATCH_CLASS).length) return;
+
+    var button = $('<div class="full-start__button selector ' + UNWATCH_CLASS + '">' + UNWATCH_SVG +
+      '<span>' + UNWATCH_TITLE + '</span></div>');
+    button.on('hover:enter', function () {
+      unwatch(card, null);
+      var neighbour = button.prevAll('.selector:visible').first();
+      button.remove();
+      Lampa.Controller.toggle('full_start');
+      if (!neighbour.length) return;
+      try {
+        Lampa.Controller.collectionFocus(neighbour[0], buttons);
+      } catch (e) { /* старая версия Lampa — фокус останется на месте */ }
+    });
+    var options = buttons.find('.button--options');
+    if (options.length) options.before(button);
+    else buttons.append(button);
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  Настройки и запуск
   // ─────────────────────────────────────────────────────────────
 
@@ -688,7 +817,9 @@
     hideCoreRow();
     registerWideRow();
     Lampa.Listener.follow('full', function (event) {
-      if (event.type === 'complite') addButton(event);
+      if (event.type !== 'complite') return;
+      addButton(event);
+      addUnwatchButton(event);
     });
   }
 
