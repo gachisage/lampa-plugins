@@ -11,6 +11,7 @@
  *   5. Ряды «Вам может понравиться»: собственный подбор по оценкам, истории просмотров,
  *      лайкам и избранному через рекомендации TMDB. Работает и без Couchmoney.
  *   6. Ваша оценка Trakt звёздочкой в углу постеров.
+ *   7. В названии рядов рекомендаций — чьи они: «(Trakt)», «(Лампа)».
  *
  * Требуется установленный и авторизованный TraktTV.js — токен берётся из Lampa.Storage('trakt_token').
  * Код написан на ES5, чтобы работать на старых WebView телевизоров.
@@ -107,6 +108,15 @@
   var SMART_HISTORY_LIMIT = 60;
   var SMART_MIN_VOTES = 40;           // отсекаем малоизвестный мусор TMDB
   var SMART_KEEP = 40;
+
+  var SOURCE_TRAKT = 'Trakt';
+  var SOURCE_LAMPA = 'Лампа';
+  // Чужие ряды рекомендаций: подбор самой Лампы по истории и ряд плагина TraktTV
+  var FOREIGN_ROW_SOURCES = {
+    'Рекомендуем посмотреть': SOURCE_LAMPA,
+    'Рекомендации': SOURCE_TRAKT
+  };
+  var LABELED_SCREENS = { main: true, category: true };
 
   var STAR_SVG = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>';
   var HIDE_SVG = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 0 1 6.32 12.9L7.1 5.68A7.96 7.96 0 0 1 12 4zM4 12c0-1.85.63-3.55 1.68-4.9L16.9 18.32A8 8 0 0 1 4 12z"/></svg>';
@@ -1013,7 +1023,7 @@
           }
           enrichFromTmdb(visible, function (meta) {
             callback({
-              title: couchTitle(list, list.kind || majorityKind(raws)),
+              title: withSource(couchTitle(list, list.kind || majorityKind(raws)), SOURCE_TRAKT),
               source: 'tmdb',
               results: visible.map(function (raw) {
                 return buildCard(raw, meta);
@@ -1258,7 +1268,7 @@
           meta[itemKey(raw.kind, raw.id)] = raw;
         });
         callback({
-          title: row.title,
+          title: withSource(row.title, smartSource()),
           source: 'tmdb',
           results: visible.map(function (raw) {
             return buildCard(raw, meta);
@@ -1375,6 +1385,61 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  Модуль 7. Чьи рекомендации: подпись в названии ряда
+  // ─────────────────────────────────────────────────────────────
+
+  function withSource(title, source) {
+    return title + ' (' + source + ')';
+  }
+
+  // Свой подбор строится по оценкам и истории Trakt и по истории, лайкам и избранному Лампы
+  function smartSource() {
+    return token() ? SOURCE_TRAKT + ' и ' + SOURCE_LAMPA : SOURCE_LAMPA;
+  }
+
+  // Обёртка ряда меняет только заголовок в данных. Код и свойства исходной функции
+  // видны через обёртку: по ним редактор главной и другие плагины узнают ряд
+  function labeledPart(part) {
+    var wrapper = function (done) {
+      var args = Array.prototype.slice.call(arguments);
+      if (typeof done === 'function') {
+        args[0] = function (data) {
+          var source = data && FOREIGN_ROW_SOURCES[data.title];
+          if (source) {
+            // TraktTV рисует заголовок своего ряда из trakt_line_title, с иконкой
+            if (data.trakt_line_title === data.title) data.trakt_line_title = withSource(data.title, source);
+            data.title = withSource(data.title, source);
+          }
+          return done.apply(this, arguments);
+        };
+      }
+      return part.apply(this, args);
+    };
+    Object.keys(part).forEach(function (key) {
+      wrapper[key] = part[key];
+    });
+    wrapper.toString = function () {
+      return String(part);
+    };
+    wrapper.source_labeled = true;
+    return wrapper;
+  }
+
+  function labelForeignRows() {
+    if (!Lampa.ContentRows || typeof Lampa.ContentRows.call !== 'function') return;
+    var original = Lampa.ContentRows.call;
+    Lampa.ContentRows.call = function (screen, params, calls) {
+      var result = original.apply(this, arguments);
+      if (LABELED_SCREENS[screen] && calls && calls.length) {
+        for (var i = 0; i < calls.length; i++) {
+          if (typeof calls[i] === 'function' && !calls[i].source_labeled) calls[i] = labeledPart(calls[i]);
+        }
+      }
+      return result;
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  Настройки
   // ─────────────────────────────────────────────────────────────
 
@@ -1431,6 +1496,7 @@
     injectStyle();
     addSettings();
     registerRows();
+    labelForeignRows();
     startBadges();
 
     Lampa.Listener.follow('full', onFullScreen);

@@ -19,7 +19,8 @@
     'continue-watch.js',
     'cinema.js',
     'next-episode.js',
-    'skip-intro.js'
+    'skip-intro.js',
+    'trailers.js'
   ];
 
   // Папка, откуда загружен этот файл: так работают и копии на других адресах
